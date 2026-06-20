@@ -1,0 +1,93 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-repomind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-repomind}
+      POSTGRES_DB: ${POSTGRES_DB:-repomind}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U repomind"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build: 
+      context: ./backend
+    command: alembic upgrade head
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-repomind}:${POSTGRES_PASSWORD:-repomind}@postgres:5432/${POSTGRES_DB:-repomind}
+      - SYNC_DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER:-repomind}:${POSTGRES_PASSWORD:-repomind}@postgres:5432/${POSTGRES_DB:-repomind}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: 
+      context: ./backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-repomind}:${POSTGRES_PASSWORD:-repomind}@postgres:5432/${POSTGRES_DB:-repomind}
+      - SYNC_DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER:-repomind}:${POSTGRES_PASSWORD:-repomind}@postgres:5432/${POSTGRES_DB:-repomind}
+      - REDIS_URL=redis://redis:6379/0
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-local}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: 
+      context: ./backend
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-repomind}:${POSTGRES_PASSWORD:-repomind}@postgres:5432/${POSTGRES_DB:-repomind}
+      - SYNC_DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER:-repomind}:${POSTGRES_PASSWORD:-repomind}@postgres:5432/${POSTGRES_DB:-repomind}
+      - REDIS_URL=redis://redis:6379/0
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-local}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  postgres_data:
